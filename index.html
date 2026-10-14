@@ -101,6 +101,44 @@
     transition: .2s; pointer-events: none;
   }
   .toast.show { opacity: 1; transform: translateX(-50%); }
+  .cloud {
+    position: relative; width: 40px; height: 40px; border-radius: 20px;
+    border: 0; background: none; color: var(--muted); font-size: 20px;
+  }
+  .cloud .dot {
+    position: absolute; right: 6px; top: 8px; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted);
+  }
+  .cloud.ok .dot { background: var(--accent); }
+  .cloud.busy .dot { background: #e0a030; }
+  .cloud.off .dot { background: #d05050; }
+  [hidden] { display: none !important; }
+  .sheet-bg {
+    position: fixed; inset: 0; z-index: 5; background: rgba(0, 0, 0, .35);
+    display: flex; align-items: flex-end; justify-content: center;
+  }
+  .sheet {
+    width: 100%; max-width: 480px; background: var(--card); color: var(--text);
+    border-radius: 16px 16px 0 0;
+    padding: 20px 16px calc(env(safe-area-inset-bottom) + 16px);
+  }
+  .sheet h2 { font-size: 17px; margin: 0 0 8px; }
+  .sheet .note { color: var(--muted); font-size: 14px; line-height: 1.6; margin: 0 0 12px; word-break: break-all; }
+  .sheet input {
+    display: block; width: 100%; margin: 0 0 10px; padding: 12px;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg); color: var(--text); font: inherit; font-size: 16px;
+  }
+  .sheet .row { display: flex; gap: 8px; }
+  .sheet button {
+    flex: 1; padding: 12px; border-radius: 10px; font-size: 15px; font-weight: 600;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  }
+  .sheet button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .sheet button.link { display: block; border: 0; background: none; color: var(--accent); margin-top: 8px; padding: 8px; width: 100%; }
+  .sheet button.close { color: var(--muted); }
+  .sheet button:disabled { opacity: .5; }
+  .sheet .err { color: #d05050; font-size: 13px; min-height: 1em; margin: 0 0 8px; }
 </style>
 </head>
 <body>
@@ -108,10 +146,34 @@
   <button class="nav" id="prev" aria-label="前の月">‹</button>
   <button class="month" id="month" title="今月へ"></button>
   <button class="nav" id="next" aria-label="次の月">›</button>
+  <button class="cloud" id="cloud" aria-label="同期" hidden><span class="dot" id="cloudDot"></span>☁</button>
   <button class="copy-all" id="copyAll">コピー</button>
 </header>
 <main id="list"></main>
 <div class="toast" id="toast"></div>
+
+<div class="sheet-bg" id="sheet" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="sheetTitle">
+    <h2 id="sheetTitle">同期（iPhone・iPad）</h2>
+    <div id="signedOut">
+      <p class="note">同じメールアドレスとパスワードでログインすると、端末どうしでメモが同期されます。</p>
+      <input id="email" type="email" placeholder="メールアドレス" autocomplete="username" autocapitalize="off">
+      <input id="password" type="password" placeholder="パスワード（6文字以上）" autocomplete="current-password">
+      <p class="err" id="authErr"></p>
+      <div class="row">
+        <button class="primary" id="signIn">ログイン</button>
+        <button id="signUp">はじめて使う（登録）</button>
+      </div>
+      <button class="link" id="reset">パスワードを忘れた</button>
+    </div>
+    <div id="signedIn" hidden>
+      <p class="note"><span id="who"></span> でログイン中</p>
+      <p class="note">状態：<span id="syncState"></span></p>
+      <button id="signOut">ログアウト</button>
+    </div>
+    <button class="link close" id="closeSheet">閉じる</button>
+  </div>
+</div>
 
 <script>
 (() => {
@@ -150,20 +212,27 @@
     return arr;
   }
 
-  let saveTimer;
+  const cleanMonth = (arr) => (arr || []).filter((it) => it.text.trim() !== '');
+
+  let saveTimer = null;
+  function persistLocal() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    const out = {};
+    for (const [k, arr] of Object.entries(data)) {
+      const kept = cleanMonth(arr);
+      if (kept.length) out[k] = kept;
+    }
+    try { localStorage.setItem(KEY, JSON.stringify(out)); } catch (e) {}
+  }
   const save = () => {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      const out = {};
-      for (const [k, arr] of Object.entries(data)) {
-        const kept = arr.filter((it) => it.text.trim() !== '');
-        if (kept.length) out[k] = kept;
-      }
-      try { localStorage.setItem(KEY, JSON.stringify(out)); } catch (e) {}
-    }, 200);
+    saveTimer = setTimeout(persistLocal, 200);
+    window.memoApp.onChange?.(current);
   };
-  window.addEventListener('pagehide', () => { clearTimeout(saveTimer); saveTimer = null; save(); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
+  const flushLocal = () => { if (saveTimer) persistLocal(); };
+  window.addEventListener('pagehide', flushLocal);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushLocal(); });
 
   const autosize = (ta) => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
 
@@ -356,6 +425,34 @@
     copy(monthText(), `${m}月のメモをコピーしました`);
   };
 
+  // 同期（sync.js）から使う窓口
+  window.memoApp = {
+    onChange: null,
+    months() {
+      const out = {};
+      for (const k of Object.keys(data)) out[k] = cleanMonth(data[k]);
+      return out;
+    },
+    // 他の端末で変わった月の内容を反映する。入力中の行とカーソル位置はなるべく保つ
+    setMonth(k, arr) {
+      data[k] = arr.map((it) => ({ ...it }));
+      persistLocal();
+      if (k !== current) return;
+      const a = document.activeElement;
+      if (a && a.tagName === 'TEXTAREA' && listEl.contains(a)) {
+        const id = a.dataset.id;
+        if (a.value === '' && !data[k].some((it) => it.id === id)) {
+          data[k].push({ id, text: '', done: false, t: newTime() });
+        }
+        render(id, a.selectionStart);
+      } else {
+        const y = window.scrollY;
+        render();
+        window.scrollTo(0, y);
+      }
+    },
+  };
+
   // 開いたら今月の一番下の入力行にカーソル
   function openAtEnd() {
     const arr = ensureTail();
@@ -364,5 +461,6 @@
   openAtEnd();
 })();
 </script>
+<script type="module" src="sync.js"></script>
 </body>
 </html>
