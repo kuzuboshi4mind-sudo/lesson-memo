@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#2f8f7a"/>
+  <g transform="translate(256 256) scale(0.9) translate(-256 -256)">
+  <rect x="96" y="104" width="320" height="304" rx="36" fill="#fff"/>
+  <path d="M138 172 l16 16 l28 -32" fill="none" stroke="#2f8f7a" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="204" y="162" width="150" height="20" rx="10" fill="#c9ddd7"/>
+  <circle cx="160" cy="256" r="12" fill="#22252a"/>
+  <rect x="204" y="246" width="176" height="20" rx="10" fill="#22252a"/>
+  <circle cx="160" cy="336" r="12" fill="#22252a"/>
+  <rect x="204" y="326" width="96" height="20" rx="10" fill="#22252a"/>
+  <g fill="#2f8f7a">
+    <rect x="356" y="296" width="10" height="64" rx="3"/>
+    <ellipse cx="346" cy="362" rx="20" ry="15" transform="rotate(-20 346 362)"/>
+    <path d="M361 296 q28 10 26 38 q-6 -18 -26 -20 z"/>
+  </g>
+</g>
+</svg>
