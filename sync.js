@@ -1,11 +1,14 @@
 // Firebase（メール＋パスワードでログイン、Firestore に保存）で端末間の同期をする。
-// メモは1項目ずつ users/{uid}/items/{id} に { m: 'YYYY-MM', text, done, t, pos } として保存する。
+// メモは1項目ずつ users/{uid}/items/{id} に { m: 'YYYY-MM', text, done, t, pos, f } として、
+// フォルダは users/{uid}/folders/{id} に { name, pos } として保存する（f はフォルダの id）。
 // 項目ごとに保存するので、2台で同時に書いたりオフラインで書いたりしても、互いのメモを上書きしない。
 import { firebaseConfig } from './firebase-config.js';
 
 const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
 const PENDING_KEY = 'lessonMemo.pending';  // まだ送れていない月（アプリを閉じても覚えておく）
 const SEEN_KEY = 'lessonMemo.seen.';       // + uid：この端末が一度でも同期した項目の id
+const FPENDING_KEY = 'lessonMemo.foldersPending';
+const FSEEN_KEY = 'lessonMemo.fseen.';     // + uid：この端末が一度でも同期したフォルダの id
 const WRITE_DELAY = 800;
 
 const app = window.memoApp;
@@ -35,13 +38,17 @@ async function start() {
   }
 
   let user = null;
-  let unsub = null;
+  let unsubs = [];
   let ready = false;            // サーバーの最新を一度受け取ったか
   let remote = new Map();       // id -> { m, text, done, t, pos }（Firestore 上の状態）
   const pos = new Map();        // id -> 並び順の値（送信前に決めたものも含む）
   let seen = new Set();         // この端末が知っている項目。消したときだけ削除を送るのに使う
   const dirty = new Set(readJSON(PENDING_KEY, []));
   const timers = {};
+  let remoteFolders = new Map(); // id -> { name, pos }
+  let foldersReady = false;
+  let foldersDirty = readJSON(FPENDING_KEY, false);
+  let foldersSeen = new Set();
 
   function readJSON(key, fallback) {
     try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch (e) { return fallback; }
@@ -51,6 +58,7 @@ async function start() {
   }
   const savePending = () => writeJSON(PENDING_KEY, [...dirty]);
   const saveSeen = () => { if (user) writeJSON(SEEN_KEY + user.uid, [...seen]); };
+  const saveFSeen = () => { if (user) writeJSON(FSEEN_KEY + user.uid, [...foldersSeen]); };
 
   // ---- 送信 ----
   // 並び順：既存の項目は今の値のまま、新しい項目は前後の項目の間の値にする
@@ -83,9 +91,10 @@ async function start() {
     const ids = new Set();
     for (const it of items) {
       ids.add(it.id);
-      const doc = { m: k, text: it.text, done: !!it.done, t: it.t, pos: pos.get(it.id) };
+      const doc = { m: k, text: it.text, done: !!it.done, t: it.t, pos: pos.get(it.id), f: it.f || null };
       const r = remote.get(it.id);
-      if (!r || r.m !== doc.m || r.text !== doc.text || r.done !== doc.done || r.t !== doc.t || r.pos !== doc.pos) {
+      if (!r || r.m !== doc.m || r.text !== doc.text || r.done !== doc.done || r.t !== doc.t ||
+          r.pos !== doc.pos || (r.f || null) !== doc.f) {
         batch.set(fs.doc(col, it.id), doc);
         ops++;
       }
@@ -112,7 +121,43 @@ async function start() {
     });
     return ops;
   }
+  function writeFolders() {
+    if (!user || !foldersReady) return 0;
+    const col = fs.collection(db, 'users', user.uid, 'folders');
+    const batch = fs.writeBatch(db);
+    let ops = 0;
+    const ids = new Set();
+    for (const f of app.folders()) {
+      ids.add(f.id);
+      const r = remoteFolders.get(f.id);
+      if (!r || r.name !== f.name || r.pos !== f.pos) {
+        batch.set(fs.doc(col, f.id), { name: f.name, pos: f.pos });
+        ops++;
+      }
+      foldersSeen.add(f.id);
+    }
+    for (const id of remoteFolders.keys()) {
+      if (!ids.has(id) && foldersSeen.has(id)) {
+        batch.delete(fs.doc(col, id));
+        foldersSeen.delete(id);
+        ops++;
+      }
+    }
+    foldersDirty = false;
+    writeJSON(FPENDING_KEY, false);
+    saveFSeen();
+    if (!ops) return 0;
+    batch.commit().catch((e) => {
+      console.error(e);
+      foldersDirty = true;
+      writeJSON(FPENDING_KEY, true);
+      setState('off', '保存に失敗しました');
+    });
+    return ops;
+  }
+
   function flushAll() {
+    if (foldersDirty) writeFolders();
     let ops = 0;
     for (const k of [...dirty]) ops += write(k) || 0;
     return ops;
@@ -125,12 +170,37 @@ async function start() {
     clearTimeout(timers[k]);
     timers[k] = setTimeout(() => write(k), WRITE_DELAY);
   };
+  app.onFoldersChange = () => {
+    foldersDirty = true;
+    writeJSON(FPENDING_KEY, true);
+    writeFolders();
+  };
   window.addEventListener('pagehide', flushAll);
   document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
 
   // ---- 受信 ----
   const sameList = (a, b) => a.length === b.length && a.every((x, i) =>
-    x.id === b[i].id && x.text === b[i].text && !!x.done === !!b[i].done && x.t === b[i].t);
+    x.id === b[i].id && x.text === b[i].text && !!x.done === !!b[i].done && x.t === b[i].t &&
+    (x.f || null) === (b[i].f || null));
+  const byPos = (a, b) => a.pos - b.pos || (a.id < b.id ? -1 : 1);
+
+  function onFolderSnap(snap) {
+    remoteFolders = new Map();
+    snap.forEach((d) => remoteFolders.set(d.id, d.data()));
+    if (!foldersReady) {
+      if (snap.metadata.fromCache) return;
+      foldersReady = true;
+      if (app.folders().length) foldersDirty = true; // この端末のフォルダもアカウントに合わせる
+    }
+    if (foldersDirty) { writeFolders(); return; } // 送った分を含む次の通知で反映する
+    const list = [...remoteFolders].map(([id, r]) => ({ id, name: r.name, pos: r.pos })).sort(byPos);
+    const local = app.folders().sort(byPos);
+    const same = list.length === local.length &&
+      list.every((f, i) => f.id === local[i].id && f.name === local[i].name && f.pos === local[i].pos);
+    if (!same) app.setFolders(list);
+    list.forEach((f) => foldersSeen.add(f.id));
+    saveFSeen();
+  }
 
   function onSnap(snap) {
     remote = new Map();
@@ -139,7 +209,7 @@ async function start() {
       const r = d.data();
       remote.set(d.id, r);
       pos.set(d.id, r.pos);
-      (byMonth[r.m] ||= []).push({ id: d.id, text: r.text, done: !!r.done, t: r.t, pos: r.pos });
+      (byMonth[r.m] ||= []).push({ id: d.id, text: r.text, done: !!r.done, t: r.t, pos: r.pos, f: r.f || null });
     });
 
     if (!ready) {
@@ -156,7 +226,7 @@ async function start() {
       if (dirty.has(k) || timers[k]) continue; // 書きかけの月は送ったあとで反映する
       const list = (byMonth[k] || [])
         .sort((a, b) => a.pos - b.pos || a.t - b.t || (a.id < b.id ? -1 : 1))
-        .map(({ id, text, done, t }) => ({ id, text, done, t }));
+        .map(({ id, text, done, t, f }) => (f ? { id, text, done, t, f } : { id, text, done, t }));
       if (!sameList(list, local[k] || [])) app.setMonth(k, list);
       list.forEach((it) => seen.add(it.id));
     }
@@ -171,21 +241,24 @@ async function start() {
   }
 
   auth.onAuthStateChanged(authInst, (u) => {
-    if (unsub) { unsub(); unsub = null; }
+    unsubs.forEach((f) => f());
+    unsubs = [];
     user = u;
     ready = false;
     remote = new Map();
     pos.clear();
     seen = new Set(u ? readJSON(SEEN_KEY + u.uid, []) : []);
+    foldersReady = false;
+    remoteFolders = new Map();
+    foldersSeen = new Set(u ? readJSON(FSEEN_KEY + u.uid, []) : []);
     renderSheet();
     if (!u) { setState('off', '未ログイン'); return; }
     setState('busy', '同期中…');
-    unsub = fs.onSnapshot(
-      fs.collection(db, 'users', u.uid, 'items'),
-      { includeMetadataChanges: true },
-      onSnap,
-      (e) => { console.error(e); setState('off', '同期できません（' + e.code + '）'); },
-    );
+    const onErr = (e) => { console.error(e); setState('off', '同期できません（' + e.code + '）'); };
+    unsubs = [
+      fs.onSnapshot(fs.collection(db, 'users', u.uid, 'folders'), { includeMetadataChanges: true }, onFolderSnap, onErr),
+      fs.onSnapshot(fs.collection(db, 'users', u.uid, 'items'), { includeMetadataChanges: true }, onSnap, onErr),
+    ];
   });
 
   // ---- 画面 ----
@@ -240,7 +313,10 @@ async function start() {
   $('signOut').onclick = async () => {
     flushAll();
     // 次にログインしたときは、その間にこの端末で書いたメモもアカウントに合わせる
-    try { localStorage.removeItem(SEEN_KEY + user.uid); } catch (e) {}
+    try {
+      localStorage.removeItem(SEEN_KEY + user.uid);
+      localStorage.removeItem(FSEEN_KEY + user.uid);
+    } catch (e) {}
     await auth.signOut(authInst);
   };
 }
