@@ -96,11 +96,28 @@
     border: 0; background: none; color: var(--accent); font-size: 12px;
     padding: 0 0 6px; margin-top: -2px;
   }
-  .fbtn {
-    flex: none; width: 34px; height: 34px; border: 0; background: none; font-size: 17px;
-    visibility: hidden; padding: 0;
+  .tools { display: none; gap: 8px; padding: 2px 0 8px; }
+  .item:focus-within .tools { display: flex; }
+  .tools button {
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+    border-radius: 14px; padding: 4px 12px; font-size: 13px;
   }
-  .item:focus-within .fbtn { visibility: visible; }
+  .imgs { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 8px; }
+  .imgs button {
+    width: 76px; height: 76px; padding: 0; border: 1px solid var(--line); border-radius: 8px;
+    overflow: hidden; background: var(--card);
+  }
+  .imgs img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .viewer {
+    position: fixed; inset: 0; z-index: 6; background: #000;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  .viewer img { flex: 1; min-height: 0; width: 100%; object-fit: contain; }
+  .viewer .bar { display: flex; justify-content: space-between; padding: 10px 16px; }
+  .viewer .bar button { border: 0; background: none; color: #fff; font-size: 16px; padding: 8px; }
+  .viewer .bar .del { color: #ff8080; }
+  .viewer p { color: #bbb; font-size: 12px; text-align: center; margin: 0 0 8px; }
   .bullet {
     flex: none; width: 28px; height: 34px; border: 0; background: none;
     display: flex; align-items: center; justify-content: center; padding: 0;
@@ -188,6 +205,16 @@
 <main id="list"></main>
 <div class="toast" id="toast"></div>
 
+<input type="file" id="imgInput" accept="image/*" multiple hidden>
+<div class="viewer" id="viewer" hidden>
+  <div class="bar">
+    <button class="del" id="viewerDel">削除</button>
+    <button id="viewerClose">閉じる</button>
+  </div>
+  <img id="viewerImg" alt="">
+  <p>長押しで写真に保存できます</p>
+</div>
+
 <div class="sheet-bg" id="modal" hidden>
   <div class="sheet" role="dialog" aria-labelledby="modalTitle">
     <h2 id="modalTitle"></h2>
@@ -253,13 +280,15 @@
     return new Date(y, m - 1, 1, 12).getTime();
   };
   const month = (k) => (data[k] ||= []);
-  const cleanMonth = (arr) => (arr || []).filter((it) => it.text.trim() !== '');
+  // 文字か画像があれば中身のあるメモ
+  const hasImgs = (it) => !!(it.imgs && it.imgs.length);
+  const cleanMonth = (arr) => (arr || []).filter((it) => it.text.trim() !== '' || hasImgs(it));
 
   // 画面に並べる項目：{ it, k }（k はその項目が入っている月）
   function buildView(keepId) {
     // 入力中の行以外の空行は片づける
     for (const k of Object.keys(data)) {
-      data[k] = data[k].filter((it) => it.text !== '' || it.id === keepId);
+      data[k] = data[k].filter((it) => it.text !== '' || hasImgs(it) || it.id === keepId);
     }
     let view;
     if (folder) {
@@ -271,7 +300,8 @@
       view = month(current).map((it) => ({ it, k: current }));
     }
     // いつでもすぐ書けるよう、最後は空行にしておく
-    if (!view.length || view[view.length - 1].it.text !== '') {
+    const tail = view[view.length - 1];
+    if (!tail || tail.it.text !== '' || hasImgs(tail.it)) {
       const k = folder ? thisMonth() : current;
       const it = { id: uid(), text: '', done: false, t: newTime() };
       if (folder) it.f = folder;
@@ -374,7 +404,7 @@
       // タップしても入力中の行からフォーカス（キーボード）を奪わない
       bullet.addEventListener('mousedown', (e) => e.preventDefault());
       bullet.onclick = () => {
-        if (it.text === '') return;
+        if (it.text === '' && !hasImgs(it)) return;
         it.done = !it.done;
         row.classList.toggle('done', it.done);
         save(v.k);
@@ -426,15 +456,39 @@
         body.appendChild(tag);
       }
 
-      const fbtn = document.createElement('button');
-      fbtn.className = 'fbtn';
-      fbtn.textContent = '📁';
-      fbtn.setAttribute('aria-label', 'フォルダに入れる');
-      fbtn.tabIndex = -1;
-      fbtn.addEventListener('mousedown', (e) => e.preventDefault());
-      fbtn.onclick = () => pickFolder(v);
+      if (hasImgs(it)) {
+        const imgs = document.createElement('div');
+        imgs.className = 'imgs';
+        for (const imgId of it.imgs) {
+          const b = document.createElement('button');
+          b.setAttribute('aria-label', '画像を開く');
+          const img = document.createElement('img');
+          img.alt = '';
+          showImage(img, imgId);
+          b.appendChild(img);
+          b.onclick = () => openViewer(v, imgId);
+          imgs.appendChild(b);
+        }
+        body.appendChild(imgs);
+      }
 
-      row.append(bullet, body, fbtn);
+      // 選んでいる行の下に出る道具：画像を付ける・フォルダに入れる
+      const tools = document.createElement('div');
+      tools.className = 'tools';
+      const tool = (label, fn) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.tabIndex = -1;
+        // 押しても入力中の行からフォーカス（キーボード）を奪わない
+        b.addEventListener('mousedown', (e) => e.preventDefault());
+        b.onclick = fn;
+        tools.appendChild(b);
+      };
+      tool('📷 画像', () => pickImages(v));
+      tool('📁 フォルダ', () => pickFolder(v));
+      body.appendChild(tools);
+
+      row.append(bullet, body);
       listEl.appendChild(row);
     });
 
@@ -483,6 +537,7 @@
       const prev = view[i - 1];
       const caret = prev.it.text.length;
       prev.it.text += it.text;
+      if (hasImgs(it)) prev.it.imgs = [...(prev.it.imgs || []), ...it.imgs];
       const arr = month(k);
       arr.splice(arr.indexOf(it), 1);
       save(k, prev.k);
@@ -583,10 +638,11 @@
 
   // メモをフォルダに入れる・出す
   function pickFolder(v) {
-    const { it, k } = v;
+    const { it } = v;
     const assign = (fid) => {
-      if (fid) it.f = fid; else delete it.f;
-      save(k);
+      const found = findItem(it.id) || v;
+      if (fid) found.it.f = fid; else delete found.it.f;
+      save(found.k);
       closeModal();
       // 空行に先にフォルダを決めた場合は、そのまま書けるようにする
       render(it.text === '' || !folder ? it.id : undefined);
@@ -623,11 +679,174 @@
     });
   }
 
+  // ---- 画像 ----
+  // 画像はこの端末の IndexedDB に保存し（ログイン中は sync.js がクラウドにも送る）、
+  // メモには画像の id だけを持たせる（it.imgs）
+  const imgDB = new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('lessonMemoImages', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('images');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch (e) { resolve(null); }
+  });
+  async function idb(mode, fn) {
+    const db = await imgDB;
+    if (!db) return undefined;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('images', mode);
+        const req = fn(tx.objectStore('images'));
+        tx.oncomplete = () => resolve(req.result);
+        tx.onerror = () => resolve(undefined);
+      } catch (e) { resolve(undefined); }
+    });
+  }
+  const imgCache = new Map();
+  async function getLocalImage(id) {
+    if (imgCache.has(id)) return imgCache.get(id);
+    const data = await idb('readonly', (st) => st.get(id));
+    if (data) imgCache.set(id, data);
+    return data || null;
+  }
+  async function putImage(id, data) {
+    imgCache.set(id, data);
+    await idb('readwrite', (st) => st.put(data, id));
+  }
+  const fetching = new Map();
+  // 端末に無い画像（他の端末で付けたもの）はクラウドから取ってくる
+  function loadImage(id) {
+    if (imgCache.has(id)) return Promise.resolve(imgCache.get(id));
+    if (!fetching.has(id)) {
+      fetching.set(id, (async () => {
+        let data = await getLocalImage(id);
+        if (!data && window.memoApp.fetchImage) {
+          data = await window.memoApp.fetchImage(id).catch(() => null);
+          if (data) await putImage(id, data);
+        }
+        fetching.delete(id);
+        return data;
+      })());
+    }
+    return fetching.get(id);
+  }
+
+  // 他の端末で付けた画像は、メモより少し遅れて届くことがあるので、届くまで何度か取りにいく
+  async function showImage(img, id, tries = 0) {
+    const src = await loadImage(id);
+    if (src) { img.src = src; return; }
+    if (tries < 10) setTimeout(() => { if (img.isConnected) showImage(img, id, tries + 1); }, 3000);
+  }
+
+  // 大きな写真は長い辺 1600px までの JPEG に縮める（クラウドの1件あたりの上限に収めるため）
+  async function resizeImage(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = reject;
+        im.src = url;
+      });
+      let max = 1600;
+      let q = 0.8;
+      let out = null;
+      for (let i = 0; i < 6; i++) {
+        const sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.naturalWidth * sc));
+        c.height = Math.max(1, Math.round(img.naturalHeight * sc));
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, c.width, c.height);
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        out = c.toDataURL('image/jpeg', q);
+        if (out.length <= 700000) return out;
+        max = Math.round(max * 0.8);
+        q = Math.max(0.5, q - 0.1);
+      }
+      return out && out.length <= 900000 ? out : null;
+    } catch (e) {
+      return null;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  // 他の端末の変更で項目が作り直されていても、id で今の項目を探す
+  function findItem(id) {
+    for (const [k, arr] of Object.entries(data)) {
+      const it = arr.find((x) => x.id === id);
+      if (it) return { it, k };
+    }
+    return null;
+  }
+
+  const imgInput = $('imgInput');
+  function pickImages(v) {
+    const targetId = v.it.id;
+    imgInput.value = '';
+    imgInput.onchange = async () => {
+      const files = [...imgInput.files];
+      if (!files.length) return;
+      toast('画像を追加しています…');
+      const ids = [];
+      for (const file of files) {
+        const dataUrl = await resizeImage(file);
+        if (!dataUrl) continue;
+        const id = uid();
+        await putImage(id, dataUrl);
+        // クラウドへの送信待ちに入れる（同期の準備が済んでいなくても後で送られる）
+        try {
+          const q = JSON.parse(localStorage.getItem('lessonMemo.imgQueue')) || [];
+          localStorage.setItem('lessonMemo.imgQueue', JSON.stringify([...q, id]));
+        } catch (e) {}
+        window.memoApp.onImageAdded?.(id);
+        ids.push(id);
+      }
+      if (!ids.length) { toast('この画像は追加できませんでした'); return; }
+      const found = findItem(targetId);
+      if (!found) return;
+      found.it.imgs = [...(found.it.imgs || []), ...ids];
+      save(found.k);
+      render(found.it.id);
+      toast(`画像を${ids.length}枚追加しました`);
+    };
+    imgInput.click();
+  }
+
+  const viewer = $('viewer');
+  let viewing = null; // { itemId, imgId }
+  async function openViewer(v, imgId) {
+    viewing = { itemId: v.it.id, imgId };
+    $('viewerImg').removeAttribute('src');
+    viewer.hidden = false;
+    const src = await loadImage(imgId);
+    if (src && viewing && viewing.imgId === imgId) $('viewerImg').src = src;
+  }
+  $('viewerClose').onclick = () => { viewer.hidden = true; viewing = null; };
+  $('viewerDel').onclick = () => {
+    if (!viewing || !confirm('この画像を削除しますか？')) return;
+    const { itemId, imgId } = viewing;
+    const found = findItem(itemId);
+    if (found && found.it.imgs) {
+      found.it.imgs = found.it.imgs.filter((x) => x !== imgId);
+      if (!found.it.imgs.length) delete found.it.imgs;
+      save(found.k);
+    }
+    imgCache.delete(imgId);
+    idb('readwrite', (st) => st.delete(imgId));
+    window.memoApp.onImageDeleted?.(imgId);
+    viewer.hidden = true;
+    viewing = null;
+    render();
+  };
+
   // ---- コピー ----
+  const lineFor = (it) => (it.done ? '✓ ' : '・') + it.text +
+    (hasImgs(it) ? `${it.text ? ' ' : ''}［画像${it.imgs.length}枚］` : '');
   function textFor(arr) {
-    return arr.filter((it) => it.text.trim() !== '')
-      .map((it) => (it.done ? '✓ ' : '・') + it.text)
-      .join('\n');
+    return cleanMonth(arr).map(lineFor).join('\n');
   }
 
   function viewText() {
@@ -635,11 +854,11 @@
     let lastDay = null;
     let lastMonth = null;
     for (const { it, k } of view) {
-      if (it.text.trim() === '') continue;
+      if (it.text.trim() === '' && !hasImgs(it)) continue;
       if (folder && k !== lastMonth) { lastMonth = k; lastDay = null; lines.push('', `【${monthLabel(k)}】`); }
       const dk = dayKey(it.t);
       if (dk !== lastDay) { lastDay = dk; lines.push('', `■ ${dayLabel(it.t)}`); }
-      lines.push((it.done ? '✓ ' : '・') + it.text);
+      lines.push(lineFor(it));
     }
     return lines.length > 1 ? lines.join('\n') : '';
   }
@@ -723,6 +942,10 @@
       if (folder || k === current) rerender();
     },
     folders: () => folders.map((f) => ({ ...f })),
+    images: { get: getLocalImage, put: putImage },
+    fetchImage: null,
+    onImageAdded: null,
+    onImageDeleted: null,
     setFolders(list) {
       folders = list.map((f) => ({ ...f }));
       try { localStorage.setItem(FOLDERS_KEY, JSON.stringify(folders)); } catch (e) {}

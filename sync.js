@@ -1,6 +1,8 @@
 // Firebase（メール＋パスワードでログイン、Firestore に保存）で端末間の同期をする。
 // メモは1項目ずつ users/{uid}/items/{id} に { m: 'YYYY-MM', text, done, t, pos, f } として、
 // フォルダは users/{uid}/folders/{id} に { name, pos } として保存する（f はフォルダの id）。
+// 画像は users/{uid}/images/{id} に { data, t }（縮めた JPEG の data URL）として保存し、
+// メモには画像の id の一覧（imgs）だけを持たせる。画像は開いたときに必要な分だけ取ってくる。
 // 項目ごとに保存するので、2台で同時に書いたりオフラインで書いたりしても、互いのメモを上書きしない。
 import { firebaseConfig } from './firebase-config.js';
 
@@ -9,6 +11,7 @@ const PENDING_KEY = 'lessonMemo.pending';  // まだ送れていない月（ア�
 const SEEN_KEY = 'lessonMemo.seen.';       // + uid：この端末が一度でも同期した項目の id
 const FPENDING_KEY = 'lessonMemo.foldersPending';
 const FSEEN_KEY = 'lessonMemo.fseen.';     // + uid：この端末が一度でも同期したフォルダの id
+const IMGQ_KEY = 'lessonMemo.imgQueue';    // この端末で付けて、まだクラウドに送っていない画像の id（アプリ側が追加する）
 const WRITE_DELAY = 800;
 
 const app = window.memoApp;
@@ -22,6 +25,9 @@ if (firebaseConfig && app) start();
 async function start() {
   cloudBtn.hidden = false;
   setState('busy', '接続中…');
+  // 読み込み中に ☁ が押されたら、準備ができたところで開く
+  let wantSheet = false;
+  cloudBtn.onclick = () => { wantSheet = true; };
 
   const [{ initializeApp }, auth, fs] = await Promise.all([
     import(`${SDK}/firebase-app.js`),
@@ -59,6 +65,48 @@ async function start() {
   const savePending = () => writeJSON(PENDING_KEY, [...dirty]);
   const saveSeen = () => { if (user) writeJSON(SEEN_KEY + user.uid, [...seen]); };
   const saveFSeen = () => { if (user) writeJSON(FSEEN_KEY + user.uid, [...foldersSeen]); };
+  const queueEdit = (fn) => {
+    const q = new Set(readJSON(IMGQ_KEY, []));
+    fn(q);
+    writeJSON(IMGQ_KEY, [...q]);
+  };
+  const imageDoc = (id) => fs.doc(db, 'users', user.uid, 'images', id);
+  const sameImgs = (a, b) => (a || []).join(',') === (b || []).join(',');
+
+  // ---- 画像 ----
+  // この端末で付けた画像は順番待ちに入れ、ログイン中ならクラウドに送る。
+  // 送信の依頼が済んだら（オフラインでも Firestore が端末内に溜めて後で送る）順番待ちから外す
+  const sending = new Set();
+  async function sendImages() {
+    if (!user || !ready) return;
+    for (const id of readJSON(IMGQ_KEY, [])) {
+      if (sending.has(id)) continue;
+      sending.add(id);
+      try {
+        const data = await app.images.get(id);
+        if (data && user) {
+          fs.setDoc(imageDoc(id), { data, t: Date.now() }).catch((e) => {
+            console.error(e);
+            queueEdit((q) => q.add(id));
+          });
+        }
+        queueEdit((q) => q.delete(id));
+      } finally {
+        sending.delete(id);
+      }
+    }
+  }
+  app.onImageAdded = () => sendImages();
+  sendImages();
+  app.fetchImage = async (id) => {
+    if (!user) return null;
+    const snap = await fs.getDoc(imageDoc(id));
+    return snap.exists() ? snap.data().data : null;
+  };
+  app.onImageDeleted = (id) => {
+    queueEdit((q) => q.delete(id));
+    if (user) fs.deleteDoc(imageDoc(id)).catch((e) => console.error(e));
+  };
 
   // ---- 送信 ----
   // 並び順：既存の項目は今の値のまま、新しい項目は前後の項目の間の値にする
@@ -91,10 +139,12 @@ async function start() {
     const ids = new Set();
     for (const it of items) {
       ids.add(it.id);
-      const doc = { m: k, text: it.text, done: !!it.done, t: it.t, pos: pos.get(it.id), f: it.f || null };
+      const doc = {
+        m: k, text: it.text, done: !!it.done, t: it.t, pos: pos.get(it.id), f: it.f || null, imgs: it.imgs || [],
+      };
       const r = remote.get(it.id);
       if (!r || r.m !== doc.m || r.text !== doc.text || r.done !== doc.done || r.t !== doc.t ||
-          r.pos !== doc.pos || (r.f || null) !== doc.f) {
+          r.pos !== doc.pos || (r.f || null) !== doc.f || !sameImgs(r.imgs, doc.imgs)) {
         batch.set(fs.doc(col, it.id), doc);
         ops++;
       }
@@ -181,7 +231,7 @@ async function start() {
   // ---- 受信 ----
   const sameList = (a, b) => a.length === b.length && a.every((x, i) =>
     x.id === b[i].id && x.text === b[i].text && !!x.done === !!b[i].done && x.t === b[i].t &&
-    (x.f || null) === (b[i].f || null));
+    (x.f || null) === (b[i].f || null) && sameImgs(x.imgs, b[i].imgs));
   const byPos = (a, b) => a.pos - b.pos || (a.id < b.id ? -1 : 1);
 
   function onFolderSnap(snap) {
@@ -209,13 +259,16 @@ async function start() {
       const r = d.data();
       remote.set(d.id, r);
       pos.set(d.id, r.pos);
-      (byMonth[r.m] ||= []).push({ id: d.id, text: r.text, done: !!r.done, t: r.t, pos: r.pos, f: r.f || null });
+      (byMonth[r.m] ||= []).push({
+        id: d.id, text: r.text, done: !!r.done, t: r.t, pos: r.pos, f: r.f || null, imgs: r.imgs || [],
+      });
     });
 
     if (!ready) {
       // サーバーの最新を受け取るまで待ってから、この端末のメモを送る（アカウントのメモと合わさる）
       if (snap.metadata.fromCache) return;
       ready = true;
+      sendImages();
       for (const [k, items] of Object.entries(app.months())) if (items.length) dirty.add(k);
       // 送った分を含む次の通知で画面に反映する
       if (flushAll()) return updateState(snap);
@@ -226,7 +279,12 @@ async function start() {
       if (dirty.has(k) || timers[k]) continue; // 書きかけの月は送ったあとで反映する
       const list = (byMonth[k] || [])
         .sort((a, b) => a.pos - b.pos || a.t - b.t || (a.id < b.id ? -1 : 1))
-        .map(({ id, text, done, t, f }) => (f ? { id, text, done, t, f } : { id, text, done, t }));
+        .map(({ id, text, done, t, f, imgs }) => {
+          const it = { id, text, done, t };
+          if (f) it.f = f;
+          if (imgs.length) it.imgs = imgs;
+          return it;
+        });
       if (!sameList(list, local[k] || [])) app.setMonth(k, list);
       list.forEach((it) => seen.add(it.id));
     }
@@ -272,6 +330,7 @@ async function start() {
   const openSheet = () => { renderSheet(); $('sheet').hidden = false; };
   const closeSheet = () => { $('sheet').hidden = true; };
   cloudBtn.onclick = openSheet;
+  if (wantSheet) openSheet();
   $('closeSheet').onclick = closeSheet;
   $('sheet').onclick = (e) => { if (e.target === $('sheet')) closeSheet(); };
 
